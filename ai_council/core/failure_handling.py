@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Dict, List, Optional, Callable, Any, Union
+from typing import Dict, List, Optional, Callable, Any, Union, ContextManager
 from uuid import uuid4
 
 from .models import AgentResponse, Subtask, FinalResponse, RiskLevel
@@ -114,22 +114,144 @@ class RecoveryAction:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+class CircuitBreakerStore(ABC):
+    """Abstract store for circuit breaker state."""
+    
+    @abstractmethod
+    def get_state(self, name: str) -> CircuitBreakerState: pass
+    
+    @abstractmethod
+    def set_state(self, name: str, state: CircuitBreakerState): pass
+    
+    @abstractmethod
+    def get_failure_count(self, name: str) -> int: pass
+    
+    @abstractmethod
+    def increment_failure_count(self, name: str) -> int: pass
+    
+    @abstractmethod
+    def reset_failure_count(self, name: str): pass
+
+    @abstractmethod
+    def get_success_count(self, name: str) -> int: pass
+    
+    @abstractmethod
+    def increment_success_count(self, name: str) -> int: pass
+    
+    @abstractmethod
+    def reset_success_count(self, name: str): pass
+    
+    @abstractmethod
+    def get_last_failure_time(self, name: str) -> Optional[datetime]: pass
+    
+    @abstractmethod
+    def set_last_failure_time(self, name: str, dt: datetime): pass
+    
+    @abstractmethod
+    def add_failure_time(self, name: str, dt: datetime): pass
+    
+    @abstractmethod
+    def clear_failure_times(self, name: str): pass
+
+    @abstractmethod
+    def clean_old_failure_times(self, name: str, cutoff_time: datetime) -> List[datetime]: pass
+
+    @abstractmethod
+    def lock(self, name: str) -> ContextManager: pass
+
+
+class InMemoryCircuitBreakerStore(CircuitBreakerStore):
+    """In-memory store for circuit breaker state."""
+    
+    def __init__(self):
+        self._states: Dict[str, CircuitBreakerState] = {}
+        self._failure_counts: Dict[str, int] = {}
+        self._success_counts: Dict[str, int] = {}
+        self._last_failure_times: Dict[str, datetime] = {}
+        self._failure_times: Dict[str, List[datetime]] = {}
+        self._locks: Dict[str, threading.Lock] = {}
+        self._global_lock = threading.Lock()
+        
+    def _get_lock(self, name: str) -> threading.Lock:
+        with self._global_lock:
+            if name not in self._locks:
+                self._locks[name] = threading.Lock()
+            return self._locks[name]
+            
+    def get_state(self, name: str) -> CircuitBreakerState:
+        return self._states.get(name, CircuitBreakerState.CLOSED)
+        
+    def set_state(self, name: str, state: CircuitBreakerState):
+        self._states[name] = state
+        
+    def get_failure_count(self, name: str) -> int:
+        return self._failure_counts.get(name, 0)
+        
+    def increment_failure_count(self, name: str) -> int:
+        count = self._failure_counts.get(name, 0) + 1
+        self._failure_counts[name] = count
+        return count
+        
+    def reset_failure_count(self, name: str):
+        self._failure_counts[name] = 0
+        
+    def get_success_count(self, name: str) -> int:
+        return self._success_counts.get(name, 0)
+        
+    def increment_success_count(self, name: str) -> int:
+        count = self._success_counts.get(name, 0) + 1
+        self._success_counts[name] = count
+        return count
+        
+    def reset_success_count(self, name: str):
+        self._success_counts[name] = 0
+        
+    def get_last_failure_time(self, name: str) -> Optional[datetime]:
+        return self._last_failure_times.get(name)
+        
+    def set_last_failure_time(self, name: str, dt: datetime):
+        self._last_failure_times[name] = dt
+        
+    def add_failure_time(self, name: str, dt: datetime):
+        if name not in self._failure_times:
+            self._failure_times[name] = []
+        self._failure_times[name].append(dt)
+        
+    def clear_failure_times(self, name: str):
+        self._failure_times[name] = []
+        
+    def clean_old_failure_times(self, name: str, cutoff_time: datetime) -> List[datetime]:
+        times = self._failure_times.get(name, [])
+        times = [t for t in times if t > cutoff_time]
+        self._failure_times[name] = times
+        return times
+        
+    def lock(self, name: str) -> ContextManager:
+        return self._get_lock(name)
+
+
+DEFAULT_IN_MEMORY_STORE = InMemoryCircuitBreakerStore()
+
+
 class CircuitBreaker:
     """Circuit breaker implementation for preventing cascade failures."""
     
-    def __init__(self, name: str, config: CircuitBreakerConfig):
+    def __init__(self, name: str, config: CircuitBreakerConfig, store: Optional[CircuitBreakerStore] = None):
         self.name = name
         self.config = config
-        self.state = CircuitBreakerState.CLOSED
-        self.failure_count = 0
-        self.success_count = 0
-        self.last_failure_time: Optional[datetime] = None
-        self.failure_times: List[datetime] = []
-        self._lock = threading.Lock()
+        self.store = store or DEFAULT_IN_MEMORY_STORE
+
+    @property
+    def state(self) -> CircuitBreakerState:
+        return self.store.get_state(self.name)
+
+    @state.setter
+    def state(self, value: CircuitBreakerState):
+        self.store.set_state(self.name, value)
     
     def call(self, func: Callable, *args, **kwargs) -> Any:
         """Execute a function through the circuit breaker."""
-        with self._lock:
+        with self.store.lock(self.name):
             if self.state == CircuitBreakerState.OPEN:
                 if self._should_attempt_reset():
                     self.state = CircuitBreakerState.HALF_OPEN
@@ -147,7 +269,7 @@ class CircuitBreaker:
             
     async def async_call(self, func: Callable, *args, **kwargs) -> Any:
         """Execute an asynchronous function through the circuit breaker."""
-        with self._lock:
+        with self.store.lock(self.name):
             if self.state == CircuitBreakerState.OPEN:
                 if self._should_attempt_reset():
                     self.state = CircuitBreakerState.HALF_OPEN
@@ -165,43 +287,45 @@ class CircuitBreaker:
     
     def _should_attempt_reset(self) -> bool:
         """Check if enough time has passed to attempt reset."""
-        if not self.last_failure_time:
+        last_failure_time = self.store.get_last_failure_time(self.name)
+        if not last_failure_time:
             return True
         
-        time_since_failure = datetime.utcnow() - self.last_failure_time
+        time_since_failure = datetime.utcnow() - last_failure_time
         return time_since_failure.total_seconds() >= self.config.recovery_timeout
     
     def _on_success(self):
         """Handle successful execution."""
-        with self._lock:
+        with self.store.lock(self.name):
             if self.state == CircuitBreakerState.HALF_OPEN:
-                self.success_count += 1
-                if self.success_count >= self.config.success_threshold:
+                success_count = self.store.increment_success_count(self.name)
+                if success_count >= self.config.success_threshold:
                     self.state = CircuitBreakerState.CLOSED
-                    self.failure_count = 0
-                    self.success_count = 0
-                    self.failure_times.clear()
+                    self.store.reset_failure_count(self.name)
+                    self.store.reset_success_count(self.name)
+                    self.store.clear_failure_times(self.name)
                     logger.info("Circuit breaker reset to CLOSED", extra={"circuit_breaker": self.name})
     
     def _on_failure(self):
         """Handle failed execution."""
-        with self._lock:
-            self.failure_count += 1
-            self.last_failure_time = datetime.utcnow()
-            self.failure_times.append(self.last_failure_time)
+        with self.store.lock(self.name):
+            self.store.increment_failure_count(self.name)
+            last_dt = datetime.utcnow()
+            self.store.set_last_failure_time(self.name, last_dt)
+            self.store.add_failure_time(self.name, last_dt)
             
             # Clean old failure times outside monitoring window
-            cutoff_time = self.last_failure_time - timedelta(seconds=self.config.monitoring_window)
-            self.failure_times = [t for t in self.failure_times if t > cutoff_time]
+            cutoff_time = last_dt - timedelta(seconds=self.config.monitoring_window)
+            current_times = self.store.clean_old_failure_times(self.name, cutoff_time)
             
             if (self.state == CircuitBreakerState.CLOSED and 
-                len(self.failure_times) >= self.config.failure_threshold):
+                len(current_times) >= self.config.failure_threshold):
                 self.state = CircuitBreakerState.OPEN
-                self.success_count = 0
-                logger.warning("Circuit breaker opened", extra={"circuit_breaker": self.name, "failures": len(self.failure_times)})
+                self.store.reset_success_count(self.name)
+                logger.warning("Circuit breaker opened", extra={"circuit_breaker": self.name, "failures": len(current_times)})
             elif self.state == CircuitBreakerState.HALF_OPEN:
                 self.state = CircuitBreakerState.OPEN
-                self.success_count = 0
+                self.store.reset_success_count(self.name)
                 logger.warning("Circuit breaker reopened after failure in HALF_OPEN state", extra={"circuit_breaker": self.name})
 
 
@@ -414,9 +538,10 @@ class FailureIsolator:
 class ResilienceManager:
     """Main manager for system resilience and failure handling."""
     
-    def __init__(self):
+    def __init__(self, circuit_breaker_store: Optional[CircuitBreakerStore] = None):
         self.handlers: List[FailureHandler] = []
         self.circuit_breakers: Dict[str, CircuitBreaker] = {}
+        self.circuit_breaker_store = circuit_breaker_store
         self.failure_isolator = FailureIsolator()
         self.failure_history: List[FailureEvent] = []
         self.max_history_size = 1000
@@ -454,7 +579,7 @@ class ResilienceManager:
     
     def create_circuit_breaker(self, name: str, config: CircuitBreakerConfig) -> CircuitBreaker:
         """Create and register a circuit breaker."""
-        circuit_breaker = CircuitBreaker(name, config)
+        circuit_breaker = CircuitBreaker(name, config, self.circuit_breaker_store)
         self.circuit_breakers[name] = circuit_breaker
         return circuit_breaker
     
