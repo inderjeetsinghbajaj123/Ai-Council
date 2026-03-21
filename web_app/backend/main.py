@@ -95,16 +95,19 @@ else:
     load_dotenv()
 
 # CORS configuration
+env = os.getenv("ENVIRONMENT", "production").strip().lower()
 allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "")
 if allowed_origins_str:
     allowed_origins = [origin.strip() for origin in allowed_origins_str.split(",") if origin.strip()]
-else:
+elif env == "development":
     allowed_origins = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:8000",
         "http://127.0.0.1:8000",
     ]
+else:
+    allowed_origins = []
 
 app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(RateLimitHeaderMiddleware)
