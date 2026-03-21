@@ -1,5 +1,5 @@
 """Execution agent implementation for AI Council."""
-
+import tiktoken
 import time
 from ai_council.core.logger import get_logger
 import asyncio
@@ -38,7 +38,9 @@ class BaseExecutionAgent(ExecutionAgent):
         
         # Initialize circuit breakers for different failure types
         from ..core.failure_handling import CircuitBreakerConfig
-        
+
+        self.encoding = tiktoken.encoding_for_model("gpt-4")
+
         # Circuit breaker for model API calls
         api_cb_config = CircuitBreakerConfig(
             failure_threshold=5,
@@ -53,6 +55,10 @@ class BaseExecutionAgent(ExecutionAgent):
         rate_limit_manager.set_rate_limit("openai", 60)  # 60 requests per minute
         rate_limit_manager.set_rate_limit("anthropic", 50)  # 50 requests per minute
         rate_limit_manager.set_rate_limit("default", 30)  # Default rate limit
+
+    def _count_tokens(self, text: str) -> int:
+        """Count tokens accurately using tiktoken."""
+        return len(self.encoding.encode(text))
     
     async def execute(self, subtask: Subtask, model: AIModel, depth: int = 0) -> AgentResponse:
         """Execute a subtask using the specified AI model with comprehensive failure handling.
@@ -784,12 +790,10 @@ class BaseExecutionAgent(ExecutionAgent):
         Returns:
             Dict[str, int]: Estimated token counts for input and output
         """
-        # Rough approximation: 1 token ≈ 4 characters for English text
-        prompt_chars = len(self._build_prompt(subtask))
-        response_chars = len(response)
-        
-        input_tokens = max(1, prompt_chars // 4)
-        output_tokens = max(1, response_chars // 4)
+
+        prompt_text = self._build_prompt(subtask)
+        input_tokens = max(1, self._count_tokens(prompt_text))
+        output_tokens = max(1, self._count_tokens(response))
         
         return {
             "input": input_tokens,
