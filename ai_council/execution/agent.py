@@ -101,7 +101,7 @@ class BaseExecutionAgent(ExecutionAgent):
                 self._execution_history[execution_key]["attempts"] = attempt + 1
                 
                 # Apply rate limiting
-                provider = self._get_model_provider(model_id)
+                provider = self._get_model_provider(model)
                 while True:
                     allowed, wait_time = rate_limit_manager.check_rate_limit(provider)
                     if not allowed:
@@ -417,18 +417,28 @@ class BaseExecutionAgent(ExecutionAgent):
             }
         )
     
-    def _get_model_provider(self, model_id: str) -> str:
-        """Get provider name from model ID for rate limiting."""
-        model_id_lower = model_id.lower()
+    def _get_model_provider(self, model: AIModel) -> str:
+        """Get provider name from model metadata for rate limiting.
         
-        if "gpt" in model_id_lower or "openai" in model_id_lower:
-            return "openai"
-        elif "claude" in model_id_lower or "anthropic" in model_id_lower:
-            return "anthropic"
-        elif "gemini" in model_id_lower or "google" in model_id_lower:
-            return "google"
-        else:
-            return "default"
+        Args:
+            model: The AI model instance
+            
+        Returns:
+            str: The provider name in lowercase, or "default"
+        """
+        # Safely extract the provider from the model's metadata
+        if hasattr(model, 'metadata') and isinstance(model.metadata, dict):
+            provider = model.metadata.get("provider")
+            if provider:
+                normalized = str(provider).strip().lower()
+                
+                # Verify the provider is actually configured in the rate limiter
+                configured_limits = getattr(rate_limit_manager, "rate_limits", {})
+                if normalized and normalized in configured_limits:
+                    return normalized
+                    
+        # Fallback if metadata is missing, provider is not specified, or unconfigured
+        return "default"
     
     async def generate_self_assessment(self, response: str, subtask: Subtask, model_id: str) -> SelfAssessment:
         """Generate a self-assessment of the agent's performance.
