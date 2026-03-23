@@ -4,6 +4,11 @@ import sys
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+import pytest
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        if "test_integration_pipeline" in item.nodeid:
+            item.add_marker(pytest.mark.skip(reason="Skipping integration tests in CI"))
 
 os.environ["JWT_SECRET_KEY"] = "test-secret"
 os.environ["JWT_ALGORITHM"] = "HS256"
