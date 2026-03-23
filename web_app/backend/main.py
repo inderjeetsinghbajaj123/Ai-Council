@@ -350,9 +350,6 @@ async def analyze_tradeoffs(request: Request, req: RequestModel, ai_council: AIC
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-if not JWT_SECRET_KEY:
-    raise RuntimeError("JWT_SECRET_KEY must be set")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 
 class WebSocketManager:
@@ -369,6 +366,11 @@ class WebSocketManager:
         self.RATE_LIMIT_WINDOW = 60  # seconds
 
     async def authenticate(self, websocket: WebSocket) -> bool:
+         
+        jwt_secret = os.getenv("JWT_SECRET_KEY")
+        if not jwt_secret:
+            raise RuntimeError("JWT_SECRET_KEY must be set for WebSocket auth")
+        jwt_algorithm = JWT_ALGORITHM
         token = websocket.query_params.get("token")
         if not token:
             try:
@@ -381,7 +383,7 @@ class WebSocketManager:
             return False
             
         try:
-            jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+            jwt.decode(token,jwt_secret, algorithms=[jwt_algorithm])
             return True
         except jwt.PyJWTError:
             return False
